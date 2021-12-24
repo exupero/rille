@@ -6,9 +6,12 @@
 ;;   the terms of this license.
 ;;   You must not remove this notice, or any other, from this software.
 
+; A fork of Clojure's tools.reader that adds support for a backtick reader macro.
+; See documention on `read-backtick-string`.
+
 (ns ^{:doc "A clojure reader in clojure"
       :author "Bronsa"}
-  clojure.tools.reader
+  rille.reader
   (:refer-clojure :exclude [read read-line read-string char read+string
                             default-data-readers *default-data-reader-fn*
                             *read-eval* *data-readers* *suppress-read*])
@@ -272,6 +275,8 @@
 (defn- escape-char [sb rdr]
   (let [ch (read-char rdr)]
     (case ch
+      \` "`"
+      \~ "~"
       \t "\t"
       \r "\r"
       \n "\n"
@@ -417,6 +422,42 @@
       -Inf Double/NEGATIVE_INFINITY
       NaN Double/NaN
       (err/reader-error rdr (str "Invalid token: ##" sym)))))
+
+(defn throw-eof-reading [rdr kind & start]
+  (let [init (case kind :regex "#\"" :string \" :backtick-string "#`")]
+    (err/eof-error rdr "Unexpected EOF reading " (name kind) " starting " (apply str init start) ".")))
+
+(defn- read-backtick-string
+  "Read to the next backtick, returns a list of strings and interpolated forms.
+   Forms can be interpolated by either ~{x} or ~(f & args), where ~{x} is used
+   for values and ~(f & args) for function invocations. Backticks can be escaped
+   by \\` and tildes \\~ (though only tildes before { or ( need to be escaped)."
+  [rdr _ opts pending-forms]
+  (loop [items []
+         sb (StringBuffer.)
+         ch (read-char rdr)]
+    (case ch
+      nil (throw-eof-reading rdr :backtick-string \` (str items))
+      \\ (recur items
+                (doto sb (.append (escape-char sb rdr)))
+                (read-char rdr))
+      \~ (let [ch (read-char rdr)]
+           (case ch
+             \{ (let [form (read* rdr true nil opts pending-forms)]
+                  (if (= (read-char rdr) \})
+                    (recur (conj items (str sb) form)
+                           (StringBuffer.)
+                           (read-char rdr))
+                    (throw-eof-reading rdr :backtick-string \` (str items))))
+             \( (let [form (read* (doto rdr (unread ch)) true nil opts pending-forms)]
+                  (recur (conj items (str sb) form)
+                         (StringBuffer.)
+                         (read-char rdr)))
+             (recur items (doto sb (.append \~) (.append ch)) (read-char rdr))))
+      \` (if (zero? (.length sb))
+           items
+           (conj items (str sb)))
+      (recur items (doto sb (.append ch)) (read-char rdr)))))
 
 (def ^:private RESERVED_FEATURES #{:else :none})
 
@@ -820,6 +861,7 @@
     \? read-cond
     \: read-namespaced-map
     \# read-symbolic-value
+    \` read-backtick-string
     nil))
 
 (defn- read-ctor [rdr class-name opts pending-forms]
